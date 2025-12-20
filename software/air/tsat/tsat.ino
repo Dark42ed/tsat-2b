@@ -2,7 +2,15 @@
 #include "Adafruit_MMA8451.h"
 #include <RFM69.h>
 #include <RFM69_ATC.h>
+#include <FS.h>
+#include <SPI.h>
+#include <SD.h>
+// -----[ SD Config ]-----
 
+#define SCK 14  // Stolen from TSAT-0 might be different now
+#define MISO 12
+#define MOSI 13
+#define SD_CS 15
 // -----[ Network Config ]-----
 #define NODEID 0
 #define NETWORKID 100
@@ -26,6 +34,12 @@
 
 #define SATELLITE_ID 1
 
+
+File flightLog;
+bool cardFail; //if sd card doesn't activate works like tsat0
+char file_name[20];
+int flightNum;
+//move these anywhere if they don't belong here
 // -----[ Types ]-----
 
 typedef struct {
@@ -169,6 +183,33 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
   return packet;
 }
 
+void datapoint_to_csv(File file, Datapoint *dp){
+
+  if(file == NULL){
+    Serial.println("File not found!");
+    return;
+  }
+  if(dp == NULL){
+    Serial.println("Null Datapoint");
+    return;
+  }
+
+  file.print(dp->index);
+  file.print(",");
+  file.print(dp->time);
+  file.print(",");
+  file.print(dp->temperature);
+  file.print(",");
+  file.print(dp->pressure);
+  file.print(",");
+  file.print(dp->altitude);
+  file.print(",");
+  file.print(dp->accel[0]); //accel x
+  file.print(",");
+  file.print(dp->accel[1]); // accel y
+  file.print(",");
+  file.println(dp->accel[2]); //accel z
+}
 // Handles receiving a ping packet.
 void handle_ping_packet(Packet *packet, uint16_t sender) {
   // Send back the same packet that received.
@@ -233,6 +274,7 @@ bool capture_data(DataPoint *dp) {
 // -----[ Initialization ]-----
 
 void setup() {
+
   radio.initialize(FREQUENCY, NODEID, NETWORKID);
   radio.setHighPower(); // needed for RFM69HCW
   radio.encrypt(ENCRYPTKEY);
@@ -264,6 +306,35 @@ void setup() {
 
   xTaskCreatePinnedToCore(communication_tx, "communication_tx", 3000, NULL, 5,
                           &communication_tx_handle, 0);
+  // SD v
+
+  cardfail = false;
+
+  if(!SD.begin()) {
+    Serial.println("SD Card Initializatoin Failed");
+    cardFail = true;
+  }else if(SD.cardType() == CARD_NONE);{
+    Serial.println("Please insert SD Card");
+    cardFail = true;
+  }
+
+  if(!cardFail){ // increments the name by 1 every flight
+    flightNum = 0;
+    do {
+      sprintf(file_name, "/tsatlog%d.csv", flightNum);
+      i++;
+    } while (SD.exists(file_name));
+    
+    flightLog = SD.open(file_name, FILE_WRITE);
+
+    if(flightLog){
+      flightLog.println("Index,Time (ms),Temperature (C),Pressure (pa),Altitude (m),Accel x (m/s^2),Accel y (m/s^2),Accel z (m/s^2)"); //prints headers for the file
+      //prints the headers to the file
+    }else{
+      Serial.println("File falied to open");
+    }
+  }
+
 }
 
 unsigned int counter = 0;
