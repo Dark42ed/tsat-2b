@@ -10,6 +10,7 @@ import threading
 from dash import Dash, Output, html, dcc, Input, State, callback, set_props
 import dash_bootstrap_components as dbc
 import random
+import logging
 
 # --------------------[ Packets ]--------------------
 
@@ -74,7 +75,7 @@ def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
     data = None
     match header.packet_type:
         case PacketType.PING:
-            # <I = little put them on the graphendian, 1 32bit uint
+            # <I = little endian, 1 32bit uint
             data = PingPacket(struct.unpack("<I", raw[4:]))
         case PacketType.TELEMETRY:
             # <6Ii = little endian, 6 32bit uints, 1 32bit int
@@ -139,10 +140,16 @@ def create_graph(plot: PlotInfo) -> dbc.Col:
         ),
     )), lg=4, md=12) # There are 12 columns for the total layout, so 4 == 1/3 width and 12 == full width
 
+# Dash uses flask internally
+# Suppress dash output to terminal except for errors
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 app = Dash("KSC TSAT-2B Live Telemetry Monitor", external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.layout = [
-    dcc.Interval(id="interval", interval=1000), # The interval to update the graphs when we recieve packets
+    dcc.Interval(id="interval", interval=250), # The interval to update the graphs when we recieve packets
     dcc.Store(id="processed-packets", data=0), # How many packets we have processed so far
+    dcc.Checklist(id="options", options=[dict(label="Autoscale 60", value="autoscale")]),
 
     dbc.Container([
         dbc.Row([
@@ -161,9 +168,10 @@ app.layout = [
 @callback(
    Output("processed-packets", "data"),
    Input("interval", "n_intervals"),
+   State("options", "value"),
    State("processed-packets", "data"),
 )
-def update_plots(_, processed_packets):
+def update_plots(_, options, processed_packets):
     # Take in new telemetry data
     for plot in plot_info:
         # This is the additional graph data we append
@@ -171,12 +179,13 @@ def update_plots(_, processed_packets):
         # Look through all the packets we haven't processed yet
         for idx in range(processed_packets, len(datapoints)):
             packet = datapoints[idx]
-            new_data_x.append(packet.frame_count)
+            new_data_x.append(packet.time)
             new_data_y.append(getattr(packet, plot.data_name))
 
+        props = dict(extendData=[dict(x=[new_data_x], y=[new_data_y])])
+
         # Setting the extendData property appends the data to the graph
-        # We use set_props rather than callback Output to avoid code bloat
-        set_props(plot.data_name, dict(extendData=[dict(x=[new_data_x], y=[new_data_y])]))
+        set_props(plot.data_name, props)
 
     return len(datapoints)
 
