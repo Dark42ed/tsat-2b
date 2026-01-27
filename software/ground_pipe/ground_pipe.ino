@@ -26,6 +26,7 @@ RFM69 radio(RFM69_CS, RFM69_IRQ);
 #endif
 
 void setup() {
+  Serial.println("Initializing!");
   // Reset the RFM69
   // Needed for it to initialize properly!
   pinMode(RFM69_RST, OUTPUT);

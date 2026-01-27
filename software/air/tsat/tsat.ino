@@ -16,14 +16,13 @@
 // Saves power
 #define ENABLE_ATC
 
-// -----[ Sensor Config ]-----
-
-#define SEALEVELPRESSURE_HPA (1013.25)
-
 // -----[ Constants ]-----
 
-#define TEST_MODE
-#define TEST_MODE_USE_MMA
+// #define TEST_MODE
+// #define TEST_MODE_USE_MMA
+
+#define RX_INTERVAL 200 // Packet receive interval
+#define TX_INTERVAL 500 // Packet send interval
 
 #define PACKET_PING 1
 #define PACKET_TELEMETRY 2
@@ -73,7 +72,7 @@ typedef struct {
   // representation is very weird (undefined?) across platorms.
   // This might not be entirely necessary, but it's good to make sure.
   // Telemetry doesn't need to be 100% accurate anyways.
-  uint32_t altitude;
+  int32_t altitude;
   uint32_t pressure;
   uint32_t temperature;
   uint32_t acceleration_magnitude;
@@ -100,8 +99,7 @@ typedef struct {
   } data;
 } Packet;
 
-static TaskHandle_t communication_rx_handle;
-static TaskHandle_t communication_tx_handle;
+static TaskHandle_t communication_handle;
 
 // Receives a packet from the communications module.
 // Parameters:
@@ -183,36 +181,54 @@ void handle_ping_packet(Packet *packet, uint16_t sender) {
   radio.send(sender, packet, sizeof(PacketHeader) + sizeof(PacketPing));
 }
 
-// The main loop for receiving packets.
-void communication_rx(void *_) {
-  while (1) {
-    Packet packet;
-    bool success = receive_packet(&packet);
+// Reads packets every RX_INTERVAL seconds
+int last_rx = 0;
+void handle_rx() {
+  if (millis() - last_rx < RX_INTERVAL) {
+    return;
+  }
+  last_rx = millis();
 
-    switch (packet.header.message_type) {
-      case PACKET_PING:
-        handle_ping_packet(&packet, radio.SENDERID);
-        break;
-        // We never should receive a telemetry packet.
-        // If we do then just ignore it.
-    }
+  Packet packet;
+  bool success = receive_packet(&packet);
 
-    vTaskDelay(200 / portTICK_PERIOD_MS);
+  switch (packet.header.message_type) {
+    case PACKET_PING:
+      handle_ping_packet(&packet, radio.SENDERID);
+      break;
+      // We never should receive a telemetry packet.
+      // If we do then just ignore it.
   }
 }
 
-void communication_tx(void *_) {
+// Sends out packets every TX_INTERVAL seconds
+int last_tx = 0;
+bool previous = false;
+void handle_tx() {
+  if (millis() - last_tx < TX_INTERVAL) {
+    return;
+  }
+  last_tx = millis();
+
+  // TODO: should we use a queue so that other threads can send packets?
+  // Maybe for TSAT-3 :)
+  DataPoint dp;
+  capture_data(&dp);
+
+  Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
+  previous = true;
+  previous_datapoint = dp;
+  // Broadcast to every node
+  radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry));
+}
+
+// The main loop for transmitting packets.
+void communication_loop(void *_) {
   bool previous = false;
   while (1) {
-    DataPoint dp;
-    capture_data(&dp);
-    Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
-    previous = true;
-    previous_datapoint = dp;
-    // Broadcast to every node
-    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry));
-
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    handle_rx();
+    handle_tx();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
 
@@ -220,13 +236,14 @@ void communication_tx(void *_) {
 
 bool mma_available = false;
 bool bmp_available = false;
+float base_pressure;
 void capture_data(DataPoint *dp) {
   dp->index = datapoint_count++;
   dp->time = millis();
   if (bmp_available && bmp.performReading()) {
     dp->temperature = bmp.temperature;
     dp->pressure = bmp.pressure;
-    dp->altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+    dp->altitude = bmp.readAltitude(base_pressure);
   } else {
     dp->temperature = 0;
     dp->pressure = 0;
@@ -286,9 +303,9 @@ void setup() {
   digitalWrite(RFM69_RST, LOW);
   delay(10);
 
+  pinMode(LED_BUILTIN, OUTPUT);
   if (!radio.initialize(FREQUENCY, NODEID, NETWORKID)) {
     // Blink LED to signal error
-    pinMode(LED_BUILTIN, OUTPUT);
     while (1) {
       digitalWrite(LED_BUILTIN, HIGH);
       delay(500);
@@ -318,19 +335,39 @@ void setup() {
     bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
     bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
     bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+    // Calibrate base pressure
+    // Note: oversampling results in pressure readings being smoothed.
+    // the first couple of readings will be inaccurate, so lets discard them
+    float pressure_sum = 0;
+    int reading_count = 0;
+    for (int i = 0; i < 10; i++) {
+      delay(200);
+      if (bmp.performReading() && i >= 5) {
+        pressure_sum += bmp.pressure;
+        reading_count++;
+      }
+    }
+
+    if (reading_count != 0) {
+      base_pressure = pressure_sum / reading_count / 100;
+    } else {
+      // Calibration failed, use a default sea-level pressure.
+      base_pressure = 1013.25;
+    }
   };
 
-  xTaskCreatePinnedToCore(communication_rx, "communication_rx", 3000, NULL, 10,
-                          &communication_rx_handle, 0);
+  // Set builtin led to on to signify we're live.
+  digitalWrite(LED_BUILTIN, HIGH);
 
-  xTaskCreatePinnedToCore(communication_tx, "communication_tx", 3000, NULL, 5,
-                          &communication_tx_handle, 0);
+  xTaskCreatePinnedToCore(communication_loop, "communication", 3000, NULL, 5, &communication_handle,
+                          0);
 }
 
+#ifdef TEST_MODE
 unsigned int counter = 0;
 bool previous = false;
 void loop() {
-#ifdef TEST_MODE
   if (radio.receiveDone()) {
     for (byte i = 0; i < radio.DATALEN; i++)
       Serial.print(radio.DATA[i]);
@@ -355,6 +392,10 @@ void loop() {
 
   Serial.println("Sleeping.");
   delay(250);
-#endif
   // put your main code here, to run repeatedly:
 }
+#endif
+
+#ifndef TEST_MODE
+void loop() {}
+#endif
