@@ -7,9 +7,9 @@
 #include <SPI.h>
 // -----[ SD Config ]-----
 
-#define SCK 14 // Stolen from TSAT-0 might be different now
-#define MISO 12
-#define MOSI 13
+#define SCK 18 // Stolen from TSAT-0 might be different now
+#define MISO 19
+#define MOSI 23
 #define SD_CS 15
 
 // -----[ Network Config ]-----
@@ -28,11 +28,8 @@
 
 // -----[ Constants ]-----
 
-// #define TEST_MODE
-// #define TEST_MODE_USE_MMA
-
 #define RX_INTERVAL 200 // Packet receive interval
-#define TX_INTERVAL 500 // Packet send interval
+#define TX_INTERVAL 500 // Packet send interval, also datapoint interval
 
 #define PACKET_PING 1
 #define PACKET_TELEMETRY 2
@@ -70,7 +67,8 @@ Adafruit_BMP3XX bmp;
 Adafruit_MMA8451 mma = Adafruit_MMA8451();
 
 unsigned int datapoint_count = 0;
-DataPoint previous_datapoint;
+bool has_latest_datapoint = false;
+DataPoint latest_datapoint;
 
 // -----[ Networking ]-----
 // Packets are sent as raw bytes.
@@ -190,8 +188,7 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
   return packet;
 }
 
-void datapoint_to_csv(File file, Datapoint *dp) {
-
+void datapoint_to_csv(File file, DataPoint *dp) {
   if (file == NULL) {
     Serial.println("File not found!");
     return;
@@ -205,17 +202,19 @@ void datapoint_to_csv(File file, Datapoint *dp) {
   file.print(",");
   file.print(dp->time);
   file.print(",");
-  file.print(dp->temperature);
+  file.print(String(dp->temperature, 5));
   file.print(",");
-  file.print(dp->pressure);
+  file.print(String(dp->pressure, 5));
   file.print(",");
-  file.print(dp->altitude);
+  file.print(String(dp->altitude, 5));
   file.print(",");
-  file.print(dp->accel[0]); // accel x
+  file.print(String(dp->accel[0], 5)); // accel x
   file.print(",");
-  file.print(dp->accel[1]); // accel y
+  file.print(String(dp->accel[1], 5)); // accel y
   file.print(",");
-  file.println(dp->accel[2]); // accel z
+  file.println(String(dp->accel[2], 5)); // accel z
+
+  file.flush();
 }
 // Handles receiving a ping packet.
 void handle_ping_packet(Packet *packet, uint16_t sender) {
@@ -245,7 +244,6 @@ void handle_rx() {
 
 // Sends out packets every TX_INTERVAL seconds
 int last_tx = 0;
-bool previous = false;
 void handle_tx() {
   if (millis() - last_tx < TX_INTERVAL) {
     return;
@@ -257,20 +255,17 @@ void handle_tx() {
   DataPoint dp;
   capture_data(&dp);
 
-  Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
-  previous = true;
-  previous_datapoint = dp;
+  // Use latest datapoint as previous datapoint
+  Packet packet = datapoint_to_telemetry(&dp, has_latest_datapoint ? &latest_datapoint : NULL);
+  // Set latest datapoint to the one we just captures
+  has_latest_datapoint = true;
+  latest_datapoint = dp;
   // Broadcast to every node
   radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry));
-}
 
-// The main loop for transmitting packets.
-void communication_loop(void *_) {
-  bool previous = false;
-  while (1) {
-    handle_rx();
-    handle_tx();
-    vTaskDelay(50 / portTICK_PERIOD_MS);
+  // TODO: should move this outside of communications code
+  if (!cardFail && flightLog) {
+    datapoint_to_csv(flightLog, &latest_datapoint);
   }
 }
 
@@ -308,33 +303,18 @@ void capture_data(DataPoint *dp) {
 
 // -----[ Initialization ]-----
 
-// Separated out for simplicity
-void test_mode_init() {
-  Serial.begin(115200);
-
-  if (mma.begin()) {
-    Serial.println("MMA Initialized!");
-    mma_available = true;
-    mma.setRange(MMA8451_RANGE_2_G);
-  } else {
-    Serial.println("MMA failed to init!");
-  }
-
-  if (bmp.begin_I2C()) {
-    bmp_available = true;
-
-    // Set up oversampling and filter initialization
-    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-    bmp.setOutputDataRate(BMP3_ODR_50_HZ);
-    Serial.println("BMP Initialized!");
-  } else {
-    Serial.println("BMP failed to init!");
+void blink_err(int blink_time) {
+  // Blink LED to signal error
+  while (1) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(blink_time);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(blink_time);
   }
 }
 
 void setup() {
+  Serial.begin(115200);
   // Reset the RFM69
   // Needed for it to initialize properly!
   pinMode(RFM69_RST, OUTPUT);
@@ -347,22 +327,11 @@ void setup() {
 
   pinMode(LED_BUILTIN, OUTPUT);
   if (!radio.initialize(FREQUENCY, NODEID, NETWORKID)) {
-    // Blink LED to signal error
-    while (1) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(500);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(500);
-    }
+    blink_err(500);
   }
 
   radio.setHighPower(); // needed for RFM69HCW
   radio.encrypt(ENCRYPTKEY);
-
-#ifdef TEST_MODE
-  test_mode_init();
-  return;
-#endif
 
   if (mma.begin()) {
     mma_available = true;
@@ -400,21 +369,13 @@ void setup() {
     }
   };
 
-  // Set builtin led to on to signify we're live.
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  xTaskCreatePinnedToCore(communication_loop, "communication", 3000, NULL, 5, &communication_handle,
-                          0);
-
   // SD v
-  cardfail = false;
-
-  if (!SD.begin()) {
-    Serial.println("SD Card Initializatoin Failed");
+  cardFail = false;
+  if (!SD.begin(SD_CS)) {
+    blink_err(250);
+    Serial.println("SD Card Initialization Failed");
     cardFail = true;
-  } else if (SD.cardType() == CARD_NONE)
-    ;
-  {
+  } else if (SD.cardType() == CARD_NONE)  {
     Serial.println("Please insert SD Card");
     cardFail = true;
   }
@@ -422,8 +383,8 @@ void setup() {
   if (!cardFail) { // increments the name by 1 every flight
     flightNum = 0;
     do {
+      flightNum++;
       sprintf(file_name, "/tsatlog%d.csv", flightNum);
-      i++;
     } while (SD.exists(file_name));
 
     flightLog = SD.open(file_name, FILE_WRITE);
@@ -431,45 +392,19 @@ void setup() {
     if (flightLog) {
       flightLog.println("Index,Time (ms),Temperature (C),Pressure (pa),Altitude (m),Accel x "
                         "(m/s^2),Accel y (m/s^2),Accel z (m/s^2)"); // prints headers for the file
+      flightLog.flush();
       // prints the headers to the file
     } else {
       Serial.println("File falied to open");
     }
   }
+
+  // Set builtin led to on to signify we're live.
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
-#ifdef TEST_MODE
-unsigned int counter = 0;
-bool previous = false;
 void loop() {
-  if (radio.receiveDone()) {
-    for (byte i = 0; i < radio.DATALEN; i++)
-      Serial.print(radio.DATA[i]);
-    Serial.println();
-
-    if (radio.ACKRequested()) {
-      radio.sendACK();
-      delay(10);
-      Serial.println(" - ACK sent");
-    }
-  }
-  Serial.println("Creating fake datapoint,");
-  DataPoint dp;
-  capture_data(&dp);
-  Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
-
-  // Broadcast to every node
-  radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry), false);
-
-  previous_datapoint = dp;
-  previous = true;
-
-  Serial.println("Sleeping.");
-  delay(250);
-  // put your main code here, to run repeatedly:
+  handle_rx();
+  handle_tx();
+  delay(50);
 }
-#endif
-
-#ifndef TEST_MODE
-void loop() {}
-#endif

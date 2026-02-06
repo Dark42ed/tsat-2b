@@ -11,6 +11,7 @@ from dash import Dash, Output, html, dcc, Input, State, callback, set_props, no_
 import dash_bootstrap_components as dbc
 import random
 import logging
+import math
 
 # --------------------[ Packets ]--------------------
 
@@ -318,10 +319,21 @@ def run():
     elif args.from_file:
         # Read in all the datapoints and graph them
         lines = open(args.from_file, 'r').readlines()
-        for line in lines:
+        # Skip first line (header line)
+        for line in lines[1:]:
             data = [float(n) for n in line.strip().split(',')]
-            packet = DataPoint(*data)
-            datapoints.append(packet)
+            datapoint = DataPoint(
+                data[0],
+                data[1]/1000,
+                data[4],
+                data[3],
+                data[2],
+                math.sqrt(data[5]**2 + data[6] ** 2 + data[7] ** 2),
+                0
+            )
+            if len(datapoints) > 0:
+                datapoint.velocity = (datapoint.altitude - datapoints[-1].altitude) / (datapoint.time - datapoints[-1].time) * 1000
+            datapoints.append(datapoint)
 
         
 t = threading.Thread(target=run)
