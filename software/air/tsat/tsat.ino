@@ -202,6 +202,7 @@ void datapoint_to_csv(File file, DataPoint *dp) {
   file.print(",");
   file.print(dp->time);
   file.print(",");
+  // Convert to string manually so we can specify decimal precision
   file.print(String(dp->temperature, 5));
   file.print(",");
   file.print(String(dp->pressure, 5));
@@ -303,13 +304,16 @@ void capture_data(DataPoint *dp) {
 
 // -----[ Initialization ]-----
 
-void blink_err(int blink_time) {
+void blink_err(int blink_count) {
   // Blink LED to signal error
   while (1) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(blink_time);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(blink_time);
+    for (int i=0; i<blink_count; i++) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(200);
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(200);
+    }
+    delay(500);
   }
 }
 
@@ -327,7 +331,7 @@ void setup() {
 
   pinMode(LED_BUILTIN, OUTPUT);
   if (!radio.initialize(FREQUENCY, NODEID, NETWORKID)) {
-    blink_err(500);
+    blink_err(1);
   }
 
   radio.setHighPower(); // needed for RFM69HCW
@@ -372,10 +376,11 @@ void setup() {
   // SD v
   cardFail = false;
   if (!SD.begin(SD_CS)) {
-    blink_err(250);
+    blink_err(2);
     Serial.println("SD Card Initialization Failed");
     cardFail = true;
   } else if (SD.cardType() == CARD_NONE)  {
+    blink_err(3);
     Serial.println("Please insert SD Card");
     cardFail = true;
   }
