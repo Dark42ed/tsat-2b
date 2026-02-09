@@ -205,7 +205,6 @@ def update(_, options, processed_packets):
                 y_axis.append(getattr(packet, plot.data_name))
 
                 # If we are 60 seconds behind the latest datapoint, break
-                # Remember, time is in ms.
                 # We do this after adding the point so that we have 1 point off the screen,
                 # which makes the scrolling effect look correct
                 if latest_time - packet.time > 60:
@@ -238,32 +237,6 @@ def update(_, options, processed_packets):
 
         return no_update, len(datapoints)
 
-
-"""
-@callback(
-   Output("processed-packets", "data"),
-   Input("interval", "n_intervals"),
-   State("options", "value"),
-   State("processed-packets", "data"),
-)
-def update_plots(_, options, processed_packets):
-    # Take in new telemetry data
-    for plot in plot_info:
-        # This is the additional graph data we append
-        new_data_x, new_data_y = [], []
-        # Look through all the packets we haven't processed yet
-        for idx in range(processed_packets, len(datapoints)):
-            packet = datapoints[idx]
-            new_data_x.append(packet.time)
-            new_data_y.append(getattr(packet, plot.data_name))
-
-        props = dict(extendData=[dict(x=[new_data_x], y=[new_data_y])])
-
-        # Setting the extendData property appends the data to the graph
-        set_props(plot.data_name, props)
-
-    return len(datapoints)
-"""
 
 # --------------------[ Main Program ]--------------------
 

@@ -1,15 +1,12 @@
 #include "Adafruit_BMP3XX.h"
 #include "Adafruit_MMA8451.h"
-#include <FS.h>
 #include <RFM69.h>
 #include <RFM69_ATC.h>
+#include <FS.h>
 #include <SD.h>
 #include <SPI.h>
 // -----[ SD Config ]-----
 
-#define SCK 18 // Stolen from TSAT-0 might be different now
-#define MISO 19
-#define MOSI 23
 #define SD_CS 15
 
 // -----[ Network Config ]-----
@@ -112,8 +109,6 @@ typedef struct {
   } data;
 } Packet;
 
-static TaskHandle_t communication_handle;
-
 // Receives a packet from the communications module.
 // Parameters:
 //   - packet: A pointer to the struct of which
@@ -188,7 +183,8 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
   return packet;
 }
 
-void datapoint_to_csv(File file, DataPoint *dp) {
+// Writes a datapoint to a csv file.
+void write_dp_to_csv(File file, DataPoint *dp) {
   if (file == NULL) {
     Serial.println("File not found!");
     return;
@@ -275,6 +271,7 @@ void handle_tx() {
 bool mma_available = false;
 bool bmp_available = false;
 float base_pressure;
+// Reads in sensor data into a datapoint
 void capture_data(DataPoint *dp) {
   dp->index = datapoint_count++;
   dp->time = millis();
@@ -304,8 +301,8 @@ void capture_data(DataPoint *dp) {
 
 // -----[ Initialization ]-----
 
+// Blink LED to signal error
 void blink_err(int blink_count) {
-  // Blink LED to signal error
   while (1) {
     for (int i=0; i<blink_count; i++) {
       digitalWrite(LED_BUILTIN, HIGH);
