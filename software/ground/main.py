@@ -12,6 +12,7 @@ import dash_bootstrap_components as dbc
 import random
 import logging
 import math
+import random
 
 # --------------------[ Packets ]--------------------
 
@@ -125,10 +126,17 @@ plot_info = [
     PlotInfo("Pressure", "pa", "pressure", 1, 2),
     PlotInfo("Altitude", "m", "altitude", 1, 3),
     PlotInfo("Acceleration Magnitude", "g", "acceleration_magnitude", 2, 1),
-    PlotInfo("Ascent Velocity", "m/s", "velocity", 2, 2)
+    PlotInfo("Ascent Velocity", "m/s", "velocity", 2, 2),
 ]
+packet_loss_plot_info = PlotInfo("Packet Loss", "%", "packet_loss", 2, 3)
+
+# Calculates packet loss % over this amount of packets
+# 20 = ~10s if there's 2 packets per second
+PACKET_LOSS_RANGE = 20
 
 datapoints: list[DataPoint] = []
+received_packets: list[bool] = []
+packet_loss_graph: list[list[int]] = [[], []]
 
 def create_graph(plot: PlotInfo, x_data, y_data) -> dbc.Col:
     layout = dict(
@@ -136,10 +144,19 @@ def create_graph(plot: PlotInfo, x_data, y_data) -> dbc.Col:
         yaxis = dict(autoscale=True, title=dict(text = plot.label))
     )
 
+    layout["xaxis"] = dict(
+        showline = True,
+        mirror = True,
+        zerolinecolor = "#AAA",
+    )
+    layout["yaxis"] = layout["xaxis"].copy()
     if x_data:
-        # If provided x_data, create a grap hwith the last 60 seconds of data
+        # If provided x_data, create a graph with the last 60 seconds of data
         max_x = x_data[-1]
-        layout["xaxis"] = dict(range = [max_x-60, max_x])
+        layout["xaxis"]["range"] = [max_x-60, max_x]
+        
+    if plot.data_name == "packet_loss":
+        layout["yaxis"]["range"] = [0, 1]
 
     return dbc.Col(dcc.Graph(id=plot.data_name, figure=dict(
         # data is a list that contains multiple lines, but we only have 1 line per graph
@@ -158,7 +175,10 @@ ksc_image = dbc.Col(html.Img(src=app.get_asset_url("ksc.png")), lg=4, md=12, sty
 app.layout = [
     dcc.Interval(id="interval", interval=250), # The interval to update the graphs when we recieve packets
     dcc.Store(id="processed-packets", data=0), # The processed data points for each graph so far.
-    dcc.Checklist(id="options", options=[dict(label="Autoscale 60", value="autoscale")]),
+    dcc.Checklist(id="options", options=[
+        dict(label="Autoscroll 60s", value="autoscale"),
+        dict(label="Show Packet Loss", value="packetloss"),
+    ]),
 
     dbc.Container([
         dbc.Row(id="container")
@@ -171,10 +191,14 @@ app.layout = [
     Input("options", "value"),
     prevent_initial_call = 'initial_duplicate'
 )
-def autoscale_changed(_):
-    # When autoscale changes, we need to reset the graphs
+def options_changed(options):
+    # When options change, we need to reset the graphs
     children = [create_graph(plot_info[i], None, None) for i in range(5)]
-    children.append(ksc_image)
+    if options and "packetloss" in options:
+        children.append(create_graph(packet_loss_plot_info, None, None))
+    else:
+        children.append(ksc_image)
+
     return children, 0
 
 
@@ -215,7 +239,26 @@ def update(_, options, processed_packets):
 
             children.append(create_graph(plot_info[i], x_axis, y_axis))
 
-        children.append(ksc_image)
+        if options and "packetloss" in options:
+            x_axis = []
+            y_axis = []
+            for idx in range(len(packet_loss_graph[0])-1, 0, -1):
+                data_time = packet_loss_graph[0][idx]
+                data_value = packet_loss_graph[1][idx]
+
+                x_axis.append(data_time)
+                y_axis.append(data_value)
+
+                # See above
+                if packet_loss_graph[0][-1] - data_time > 60:
+                    break
+
+            x_axis.reverse()
+            y_axis.reverse()
+            
+            children.append(create_graph(packet_loss_plot_info, x_axis, y_axis))
+        else:
+            children.append(ksc_image)
 
         # Reset the processed_packets counter so when we switch back from this autoscaling it correctly updates the graphs
         return children, no_update
@@ -235,10 +278,56 @@ def update(_, options, processed_packets):
             # Setting the extendData property appends the data to the graph
             set_props(plot.data_name, props)
 
+        if options and "packetloss" in options:
+            new_data_x, new_data_y = [], []
+            if len(datapoints) != 0 and processed_packets < len(datapoints):
+                range_start = datapoints[processed_packets-1].frame_count+1 if processed_packets > 0 else 0
+                for idx in range(range_start, datapoints[-1].frame_count+1):
+                    new_data_x.append(packet_loss_graph[0][idx])
+                    new_data_y.append(packet_loss_graph[1][idx])
+
+                props = dict(extendData=[dict(x=[new_data_x], y=[new_data_y])])
+
+                set_props(packet_loss_plot_info.data_name, props)
+
         return no_update, len(datapoints)
 
 
 # --------------------[ Main Program ]--------------------
+
+# Updates the packet loss graph.
+# ONLY call this when we receive a packet.
+# and call this EVERY time we receive a packet
+def update_packet_loss():
+    if len(datapoints) == 0:
+        return
+    
+    # Mark all missed packets
+    received_packets.extend(False for _ in range(len(received_packets), datapoints[-1].frame_count))
+    # Add the received packet
+    received_packets.append(True)
+
+    # Update the graph.
+    if len(datapoints) == 1:
+        prev_framecount = -1
+        prev_time = 0
+    else:
+        prev_framecount = datapoints[-2].frame_count
+        prev_time = datapoints[-2].time
+
+    range_begin = prev_framecount+1
+    range_end = datapoints[-1].frame_count+1
+    time_end = datapoints[-1].time
+    for frame_count in range(range_begin, range_end):
+        # If we miss say 4 packets, we interpolate the time between
+        # the previous packet and current packet 4 times to create
+        # points for each packet we missed.
+        interpolated_time = (frame_count - range_begin) / (range_end - range_begin) * (time_end - prev_time) + prev_time
+        loss_range_begin = max(0, frame_count + 1 - PACKET_LOSS_RANGE)
+        packet_range_received = sum(received_packets[loss_range_begin:frame_count+1])
+        packet_loss_percent = 1 - packet_range_received / (frame_count+1-loss_range_begin)
+        packet_loss_graph[0].append(interpolated_time)
+        packet_loss_graph[1].append(packet_loss_percent)
 
 parser = argparse.ArgumentParser(
     description = "TSAT-2B Telemetry Monitor"
@@ -256,18 +345,23 @@ def run():
         i = 0
 
         while running:
-            datapoints.append(TelemetryPacket(
-                i,
-                i,
-                0,
-                i * 10,
-                40*np.sin(i),
-                5 + random.random() * 10,
-                0
-            ))
+            # Simulate some packet loss
+            if random.randint(1, 5) != 1:
+                datapoints.append(TelemetryPacket(
+                    i,
+                    i,
+                    0,
+                    i * 10,
+                    40*np.sin(i/2),
+                    5 + random.random() * 10,
+                    0
+                ))
+                update_packet_loss()
+
             i += 1
 
-            time.sleep(1)
+
+            time.sleep(0.5)
 
     elif args.live:
         # Take in live data from a reciever and graph the telemetry packets
@@ -280,11 +374,14 @@ def run():
                 print("Raw:", raw)
                 line = bytes([int(i) for i in raw.split(' ')])
                 packet = deserialize_packet(line)
-                print("Packet:", packet)
-                if packet.header.packet_type == PacketType.TELEMETRY:
-                    datapoints.append(
-                        telemetry_packet_to_datapoint(packet.data)
-                    )
+                # If we already received a packet or received future packets, skip.
+                if len(packet_loss_graph[0]) <= packet.data.frame_count:
+                    print("Packet:", packet)
+                    if packet.header.packet_type == PacketType.TELEMETRY:
+                        datapoint = telemetry_packet_to_datapoint(packet.data)
+                        datapoints.append(datapoint)
+                        update_packet_loss()                    
+
                 print()
             except:
                 continue
@@ -296,17 +393,18 @@ def run():
         for line in lines[1:]:
             data = [float(n) for n in line.strip().split(',')]
             datapoint = DataPoint(
-                data[0],
+                int(data[0]),
                 data[1]/1000,
                 data[4],
                 data[3],
                 data[2],
                 math.sqrt(data[5]**2 + data[6] ** 2 + data[7] ** 2),
-                0
+                0,
             )
             if len(datapoints) > 0:
-                datapoint.velocity = (datapoint.altitude - datapoints[-1].altitude) / (datapoint.time - datapoints[-1].time) * 1000
+                datapoint.velocity = (datapoint.altitude - datapoints[-1].altitude) / (datapoint.time - datapoints[-1].time)
             datapoints.append(datapoint)
+            update_packet_loss()
 
         
 t = threading.Thread(target=run)
