@@ -1,8 +1,8 @@
 #include "Adafruit_BMP3XX.h"
 #include "Adafruit_MMA8451.h"
+#include <FS.h>
 #include <RFM69.h>
 #include <RFM69_ATC.h>
-#include <FS.h>
 #include <SD.h>
 #include <SPI.h>
 // -----[ SD Config ]-----
@@ -79,7 +79,7 @@ typedef struct {
   uint32_t time;
   // These values are fixed-point with 3 decimals.
   // Ideally they would be floating point, but floating point
-  // representation is very weird (undefined?) across platorms.
+  // representation can be very weird (undefined?) across platorms.
   // This might not be entirely necessary, but it's good to make sure.
   // Telemetry doesn't need to be 100% accurate anyways.
   int32_t altitude;
@@ -104,6 +104,8 @@ typedef struct {
 typedef struct {
   PacketHeader header;
   union {
+    // NOTE: PacketTelemetry has alignment of 32 bits, so ensure
+    // that PacketHeader size is a multiple of 32 bits. This *will* cause issues.
     PacketTelemetry telemetry;
     PacketPing ping;
   } data;
@@ -304,7 +306,7 @@ void capture_data(DataPoint *dp) {
 // Blink LED to signal error
 void blink_err(int blink_count) {
   while (1) {
-    for (int i=0; i<blink_count; i++) {
+    for (int i = 0; i < blink_count; i++) {
       digitalWrite(LED_BUILTIN, HIGH);
       delay(200);
       digitalWrite(LED_BUILTIN, LOW);
@@ -376,7 +378,7 @@ void setup() {
     blink_err(2);
     Serial.println("SD Card Initialization Failed");
     cardFail = true;
-  } else if (SD.cardType() == CARD_NONE)  {
+  } else if (SD.cardType() == CARD_NONE) {
     blink_err(3);
     Serial.println("Please insert SD Card");
     cardFail = true;
